@@ -21,6 +21,12 @@ const reportsRouter       = require('./routes/reports');
 
 const app = express();
 
+// Trust the first hop in front of this process (EB's ELB/ALB, or nginx in
+// Docker/local prod). Without this, Express never sees the request as
+// secure behind the proxy, so `cookie.secure` below never gets set and
+// the session cookie is silently dropped in production.
+app.set('trust proxy', 1);
+
 // Security headers
 app.use(helmet());
 
@@ -54,7 +60,12 @@ app.use(
     cookie: {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      // 'lax' works when frontend + backend share a domain. If they're on
+      // different origins (e.g. S3/CloudFront frontend + EB backend),
+      // set COOKIE_SAME_SITE=none in that environment — browsers require
+      // Secure to be true whenever SameSite=None, which is already the
+      // case here in production.
+      sameSite: process.env.COOKIE_SAME_SITE || 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     },
   })
