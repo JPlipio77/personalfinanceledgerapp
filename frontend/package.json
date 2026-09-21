@@ -11,7 +11,8 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage --passWithNoTests",
     "lint": "eslint src/ --ext .js,.jsx",
-    "lint:fix": "eslint src/ --ext .js,.jsx --fix"
+    "lint:fix": "eslint src/ --ext .js,.jsx --fix",
+    "package": "npm run build && cd dist && zip -r ../release.zip . && cd .."
   },
   "dependencies": {
     "@hookform/resolvers": "^3.6.0",
