@@ -29,6 +29,7 @@ name: Deploy to Vessel
 on:
   push:
     branches: [main]
+  workflow_dispatch: {} # allows a manual test run from the Actions tab, on any branch, before merging to main
 
 jobs:
   deploy-backend:
