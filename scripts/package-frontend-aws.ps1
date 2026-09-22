@@ -39,7 +39,31 @@ if (-not (Test-Path $DistDir)) {
 }
 
 if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
-Compress-Archive -Path (Join-Path $DistDir '*') -DestinationPath $OutFile -Force
+
+# Deliberately NOT using Compress-Archive: on this platform it writes zip
+# entry names with Windows-style backslashes (e.g. "assets\index.js")
+# instead of the forward slashes the ZIP format and S3/browsers expect.
+# S3 then stores that literally as a flat key containing a backslash
+# character, not a real "assets/" prefix - so a request for
+# /assets/index.js (forward slash, from index.html) 404s even though the
+# file did upload. Build the archive manually instead and force "/" in
+# every entry name.
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+$zip = [System.IO.Compression.ZipFile]::Open($OutFile, [System.IO.Compression.ZipArchiveMode]::Create)
+try {
+  $distFullPath = (Resolve-Path $DistDir).Path
+  Get-ChildItem -Path $DistDir -Recurse -File | ForEach-Object {
+    $relativePath = $_.FullName.Substring($distFullPath.Length).TrimStart('\', '/')
+    $entryName = $relativePath.Replace('\', '/')
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+      $zip, $_.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal
+    ) | Out-Null
+  }
+} finally {
+  $zip.Dispose()
+}
 
 $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 2)
 Write-Host "Created $OutFile ($sizeMB MB)"
