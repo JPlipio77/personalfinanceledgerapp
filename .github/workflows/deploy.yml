@@ -52,11 +52,12 @@ jobs:
           VESSEL_APP_ID: ${{ vars.VESSEL_BACKEND_APP_ID }}
           VESSEL_API_KEY: ${{ secrets.VESSEL_API_KEY }}
         run: |
+          VERSION_LABEL="v-$(date -u +'%Y-%m-%d-%H%M')"
           RESPONSE=$(curl -sf -X POST \
             "${VESSEL_URL}/api/applications/${VESSEL_APP_ID}/deployments" \
             -H "X-Api-Key: ${VESSEL_API_KEY}" \
             -F "artifact=@backend-eb.zip" \
-            -F "version_label=${{ github.sha }}")
+            -F "version_label=${VERSION_LABEL}")
           echo "deployment_id=$(echo "$RESPONSE" | jq -r '.id')" >> "$GITHUB_OUTPUT"
 
       - name: Wait for deployment
@@ -113,11 +114,12 @@ jobs:
           VESSEL_APP_ID: ${{ vars.VESSEL_FRONTEND_APP_ID }}
           VESSEL_API_KEY: ${{ secrets.VESSEL_API_KEY }}
         run: |
+          VERSION_LABEL="v-$(date -u +'%Y-%m-%d-%H%M')"
           RESPONSE=$(curl -sf -X POST \
             "${VESSEL_URL}/api/applications/${VESSEL_APP_ID}/deployments" \
             -H "X-Api-Key: ${VESSEL_API_KEY}" \
             -F "artifact=@frontend-web.zip" \
-            -F "version_label=${{ github.sha }}")
+            -F "version_label=${VERSION_LABEL}")
           echo "deployment_id=$(echo "$RESPONSE" | jq -r '.id')" >> "$GITHUB_OUTPUT"
 
       - name: Wait for deployment
