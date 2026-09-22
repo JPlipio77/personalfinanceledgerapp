@@ -1,68 +1,153 @@
-name: Deploy
+# Deploys backend and frontend to Vessel (apps.vessel.77dev.com) on push to
+# main. Each is a separate Vessel application, deployed independently.
+#
+# Required GitHub repo config (Settings -> Secrets and variables -> Actions):
+#
+#   Variables:
+#     VESSEL_URL              e.g. https://apps.vessel.77dev.com  (confirm the
+#                              actual API base with whoever administers Vessel
+#                              - the UI URL and API URL may not be the same host)
+#     VESSEL_BACKEND_APP_ID   numeric ID for the backend app (resolve via
+#                              GET /api/applications?name=<backend-app-name>)
+#     VESSEL_FRONTEND_APP_ID  numeric ID for the frontend app (same, by name)
+#     VITE_API_BASE_URL       e.g. https://<backend-vessel-domain>/api
+#                              (baked into the frontend JS bundle at build time)
+#     VITE_VAPID_PUBLIC_KEY   the VAPID public key (not secret - it's public by
+#                              design, safe as a Variable not a Secret)
+#
+#   Secrets:
+#     VESSEL_API_KEY          generated in Vessel -> API Keys
+#
+# NOTE: this pipeline only ships code. Backend runtime env vars (MONGODB_URI,
+# SESSION_SECRET, GOOGLE_CLIENT_ID/SECRET, SMTP_*, VAPID_PRIVATE_KEY,
+# OXR_APP_ID, NODE_ENV, ENABLE_CRON, FRONTEND_URL, COOKIE_SAME_SITE) are
+# configured once directly in Vessel's dashboard per app - they are not part
+# of this workflow and are not reset by a deploy.
+
+name: Deploy to Vessel
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
 
 jobs:
-  # ── Job 1: build full production images and push to GHCR ──────────────────
-  build-push:
-    name: Build & Push Docker Images
+  deploy-backend:
+    name: Deploy backend to Vessel
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     outputs:
-      tag:  ${{ steps.sha.outputs.tag }}
-      repo: ${{ steps.sha.outputs.repo }}
-
+      deployment_id: ${{ steps.deploy.outputs.deployment_id }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Package backend
+        run: bash scripts/package-backend-eb.sh
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set short SHA tag and lowercase repo
-        id: sha
+      - name: Deploy
+        id: deploy
+        env:
+          VESSEL_URL: ${{ vars.VESSEL_URL }}
+          VESSEL_APP_ID: ${{ vars.VESSEL_BACKEND_APP_ID }}
+          VESSEL_API_KEY: ${{ secrets.VESSEL_API_KEY }}
         run: |
-          echo "tag=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "repo=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+          RESPONSE=$(curl -sf -X POST \
+            "${VESSEL_URL}/api/applications/${VESSEL_APP_ID}/deployments" \
+            -H "X-Api-Key: ${VESSEL_API_KEY}" \
+            -F "artifact=@backend-eb.zip" \
+            -F "version_label=${{ github.sha }}")
+          echo "deployment_id=$(echo "$RESPONSE" | jq -r '.id')" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push backend image
-        uses: docker/build-push-action@v5
+      - name: Wait for deployment
+        env:
+          VESSEL_URL: ${{ vars.VESSEL_URL }}
+          VESSEL_APP_ID: ${{ vars.VESSEL_BACKEND_APP_ID }}
+          VESSEL_API_KEY: ${{ secrets.VESSEL_API_KEY }}
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.deployment_id }}
+        run: |
+          for i in $(seq 1 60); do
+            STATUS=$(curl -sf \
+              "${VESSEL_URL}/api/applications/${VESSEL_APP_ID}/deployments/${DEPLOYMENT_ID}" \
+              -H "X-Api-Key: ${VESSEL_API_KEY}" | jq -r '.status')
+            echo "Status: ${STATUS}"
+            [ "$STATUS" = "success" ] && exit 0
+            [ "$STATUS" = "failed" ]  && echo "Deployment failed." && exit 1
+            sleep 10
+          done
+          echo "Timed out after 10 min." && exit 1
+
+  deploy-frontend:
+    name: Deploy frontend to Vessel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      deployment_id: ${{ steps.deploy.outputs.deployment_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          context: ./backend
-          target: prod
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ghcr.io/${{ steps.sha.outputs.repo }}/backend:${{ steps.sha.outputs.tag }}
-            ghcr.io/${{ steps.sha.outputs.repo }}/backend:latest
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./frontend
-          target: prod
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ghcr.io/${{ steps.sha.outputs.repo }}/frontend:${{ steps.sha.outputs.tag }}
-            ghcr.io/${{ steps.sha.outputs.repo }}/frontend:latest
+      - name: Write frontend production env
+        # frontend/.env.production is gitignored (never committed) since these
+        # values get baked into the JS bundle at build time - reconstruct it
+        # here from repo Variables before building.
+        run: |
+          cat > frontend/.env.production <<ENVEOF
+          VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}
+          VITE_VAPID_PUBLIC_KEY=${{ vars.VITE_VAPID_PUBLIC_KEY }}
+          ENVEOF
 
-  # ── Job 2: dispatch to test repo after images are confirmed pushed ──────────
+      - name: Build & package frontend
+        run: bash scripts/package-frontend-aws.sh
+
+      - name: Deploy
+        id: deploy
+        env:
+          VESSEL_URL: ${{ vars.VESSEL_URL }}
+          VESSEL_APP_ID: ${{ vars.VESSEL_FRONTEND_APP_ID }}
+          VESSEL_API_KEY: ${{ secrets.VESSEL_API_KEY }}
+        run: |
+          RESPONSE=$(curl -sf -X POST \
+            "${VESSEL_URL}/api/applications/${VESSEL_APP_ID}/deployments" \
+            -H "X-Api-Key: ${VESSEL_API_KEY}" \
+            -F "artifact=@frontend-web.zip" \
+            -F "version_label=${{ github.sha }}")
+          echo "deployment_id=$(echo "$RESPONSE" | jq -r '.id')" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for deployment
+        env:
+          VESSEL_URL: ${{ vars.VESSEL_URL }}
+          VESSEL_APP_ID: ${{ vars.VESSEL_FRONTEND_APP_ID }}
+          VESSEL_API_KEY: ${{ secrets.VESSEL_API_KEY }}
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.deployment_id }}
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(curl -sf \
+              "${VESSEL_URL}/api/applications/${VESSEL_APP_ID}/deployments/${DEPLOYMENT_ID}" \
+              -H "X-Api-Key: ${VESSEL_API_KEY}" | jq -r '.status')
+            echo "Status: ${STATUS}"
+            [ "$STATUS" = "success" ] && exit 0
+            [ "$STATUS" = "failed" ]  && echo "Deployment failed." && exit 1
+            sleep 10
+          done
+          echo "Timed out after 5 min." && exit 1
+
+  # ── Job 3: dispatch to test repo once BOTH Vessel deploys have succeeded ───
+  # NOTE: the payload shape changed from the old Docker-based pipeline -
+  # there's no image_tag/image_base anymore since Vessel deploys source/build
+  # output directly, not a Docker image. ledger-app-tests' consumer likely
+  # still expects the old field names (it presumably pulled a Docker image to
+  # test against) - if so, that repo's workflow needs a matching update to
+  # read these new fields (or the deployed URLs, if it should now test the
+  # live Vessel apps instead of a local image).
   dispatch-tests:
     name: Trigger Test Pipeline
-    needs: [build-push]
+    needs: [deploy-backend, deploy-frontend]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
@@ -78,10 +163,10 @@ jobs:
               event_type: 'app-deployed',
               client_payload: {
                 sha: context.sha,
-                image_tag: '${{ needs.build-push.outputs.tag }}',
-                image_base: `ghcr.io/${context.repo.owner.toLowerCase()}/${context.repo.repo.toLowerCase()}`,
+                backend_deployment_id: '${{ needs.deploy-backend.outputs.deployment_id }}',
+                frontend_deployment_id: '${{ needs.deploy-frontend.outputs.deployment_id }}',
                 triggered_by: context.actor,
                 source_run_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               }
             });
-            core.info('Test pipeline dispatched for image tag: ${{ needs.build-push.outputs.tag }}');
+            core.info('Test pipeline dispatched for backend deployment ${{ needs.deploy-backend.outputs.deployment_id }} / frontend deployment ${{ needs.deploy-frontend.outputs.deployment_id }}');
